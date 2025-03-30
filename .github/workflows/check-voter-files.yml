@@ -1,0 +1,70 @@
+name: Check for new Voter File data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 17:00 UTC (10am PDT, 9am PST) every day
+    - cron: "0 17 * * *"
+
+jobs:
+  check-voter-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rclone
+        run: |
+          wget -O - $(wget --header="Content-Type: application/json" \
+                        -qO- https://api.github.com/repos/rclone/rclone/releases/latest |
+                        jq -r ".assets[] | select(.name | test(\"linux-amd64.zip\")) | .browser_download_url") \
+            | busybox unzip - -od ~ -j */rclone
+          chmod 755 ~/rclone
+      
+      - name: Configure rclone
+        run: mkdir -p ~/.config/rclone && echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+
+      # Get the list of files in the Google Shared Drive, selecting only .zip files and stripping paths
+      - name: List files in Google Drive
+        id: google-drive-files  
+        run: |
+          echo 'FILES<<EOF' >> $GITHUB_OUTPUT
+          ~/rclone ls 'l2voter:' | grep -Po '\s*\d+.*?\K([^/]+\.zip)$' >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      # Get the list of files in the VMFiles folder on the L2 SFTP server, selecting only .zip files
+      - name: List files in FTP server
+        id: l2-sftp-files
+        run: |
+          export SSHPASS="${{ secrets.L2_SFTP_PASSWORD }}" 
+          echo 'FILES<<EOF' >> $GITHUB_OUTPUT
+          FILES=$(sshpass -e sftp -o StrictHostKeyChecking=no -o BatchMode=no -o PubkeyAuthentication=no -b - \
+                  ${{ secrets.L2_SFTP_CONNECTION_STRING }} <<EOF
+          @cd VMFiles
+          @ls -lh *.zip
+          EOF
+          )
+          echo "$FILES" | awk '{print $9}' >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      # Compare the lists, returning only files on the SFTP server and not on Google Drive
+      - name: Check for new files
+        id: new-files
+        run: |
+          echo 'FILES<<EOF' >> $GITHUB_OUTPUT
+          grep -vFf \
+            <(echo "${{ steps.google-drive-files.outputs.FILES }}") \
+            <(echo "${{ steps.l2-sftp-files.outputs.FILES }}") >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      # If there are new files, send a Slack notification
+      - name: Send Slack notification
+        if: ${{ steps.new-files.outputs.FILES }}
+        run: |
+          export FILES="${{ steps.new-files.outputs.FILES }}"
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-type: application/json' \
+            --data @- << EOF 
+          {
+            "text":
+            "You have new L2 Voter File data!\n\nFiles in sftp.l2political.com:/VMFiles but not in Google Drive:
+            \`\`\`${FILES//$'\n'/\\n}\`\`\`"
+          }
+          EOF
