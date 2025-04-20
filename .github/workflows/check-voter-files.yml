@@ -3,8 +3,8 @@ name: Check for new Voter File data
 on:
   workflow_dispatch:
   schedule:
-    # 17:00 UTC (10am PDT, 9am PST) every day
-    - cron: "0 17 * * *"
+    # 17:00 UTC (10am PDT, 9am PST) Mon-Fri
+    - cron: "0 17 * * 1-5"
 
 jobs:
   check-voter-files:
